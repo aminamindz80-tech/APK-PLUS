@@ -2,22 +2,58 @@ name: Compiler l'APK Android
 on:
   workflow_dispatch:
   push:
-    paths: ['android/**', 'server.py', 'static/**']
+    paths: ['**/android/**', '**/server.py', '**/static/**', '**.zip', '.github/workflows/apk.yml']
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Localiser le projet Android (dossiers dépliés, sinon zip déposé dans le dépôt)
+        id: loc
+        shell: bash
+        run: |
+          f=$(find . -name settings.gradle.kts -not -path './.git/*' | head -1)
+          if [ -z "$f" ]; then
+            echo "Pas de dossier android déplié : recherche d'un zip du projet dans le dépôt..."
+            mkdir -p /tmp/erp
+            mapfile -d '' zips < <(find . -iname '*.zip' -not -path './.git/*' -print0)
+            for z in "${zips[@]}"; do
+              if unzip -p "$z" '*server.py' 2>/dev/null | grep -q scan_parse; then
+                echo "Zip utilisé : $z"; unzip -oq "$z" -d /tmp/erp; break
+              fi
+            done
+            f=$(find /tmp/erp -name settings.gradle.kts 2>/dev/null | head -1)
+          fi
+          if [ -z "$f" ]; then
+            echo "::error::Projet Android introuvable : ni dossier android/ ni zip ERP_ATELIER_hors_ligne_scan.zip dans le dépôt. Contenu du dépôt :"
+            find . -not -path './.git/*' | sort | head -80
+            exit 1
+          fi
+          d=$(dirname "$f"); p=$(dirname "$d")
+          echo "Projet Android : $d | racine ERP : $p"
+          if [ ! -f "$p/server.py" ] || [ ! -d "$p/static" ]; then
+            echo "::error::server.py et/ou static/ manquent à côté du dossier android ($p)."
+            find "$p" -maxdepth 2 | sort | head -60; exit 1
+          fi
+          if ! grep -q scan_parse "$p/server.py"; then
+            echo "::error::Ancienne version du projet (sans la fonction Scanner). Utilisez le contenu de ERP_ATELIER_hors_ligne_scan.zip."
+            exit 1
+          fi
+          echo "dir=$d" >> "$GITHUB_OUTPUT"
+
       - uses: actions/setup-java@v4
         with: { distribution: temurin, java-version: '17' }
-      - uses: actions/setup-python@v5          # Python de compilation pour Chaquopy (même version que celle embarquée)
+      - uses: actions/setup-python@v5
         with: { python-version: '3.12' }
       - uses: gradle/actions/setup-gradle@v3
         with: { gradle-version: '8.7' }
+
       - name: Compiler l'APK
-        working-directory: android
-        run: gradle assembleDebug --no-daemon
+        working-directory: ${{ steps.loc.outputs.dir }}
+        run: gradle assembleDebug --no-daemon --stacktrace
+
       - uses: actions/upload-artifact@v4
         with:
           name: ERP_Atelier_apk
-          path: android/app/build/outputs/apk/debug/*.apk
+          path: ${{ steps.loc.outputs.dir }}/app/build/outputs/apk/debug/*.apk
